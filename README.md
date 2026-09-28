@@ -13,7 +13,9 @@ Bangladesh plants rice three times a year. **Aus** goes in with the pre-monsoon 
 | Boro | 4,726,679 | 4,844,697 | 4,515,677 |
 | Any rice | 6,474,659 | 6,430,428 | 6,361,969 |
 
-Areas cover the 13,985,088 ha inside the label footprint. District and upazila tables sum to the same national totals. All tables are in `results/`: `district_area_{year}.csv`, `upazila_area_{year}.csv`, `validation_{2022,2023}.csv`, `test_metrics.json`, `split.json`, `gap_summary.json`.
+Areas count every 20 m pixel inside the 64 geoBoundaries district polygons: 13,985,088 ha, against a geodesic polygon area of 13,985,202 ha (the tile grid leaves 103 ha of slivers uncovered). District and upazila tables sum to the same national totals. All tables are in `results/`: `district_area_{year}.csv`, `upazila_area_{year}.csv`, `validation_{2022,2023}.csv`, `test_metrics.json`, `split.json`, `gap_summary.json`.
+
+**Maps.** Release v0.1.0 carries one GeoTIFF per year (`bangladesh_rice_seasons_{year}_20m.tif`): EPSG:32646, 20 m, uint8, deflate, with overviews. Each pixel is a bitmask: 1 = Aus, 2 = Aman, 4 = Boro (so 6 = Aman and Boro), 0 = no rice, 255 = no data. The maps cover the full tile cells, including parts of India and the Bay of Bengal. Only pixels inside the district polygons enter the tables. Checksums are in the release notes; `scripts/build_mosaics.py` rebuilds the maps from the tile predictions.
 
 **Against BBS, by district (64 districts):**
 
@@ -81,6 +83,7 @@ Boro is harvested in April and May, so the 2022 Boro map is compared with BBS 20
 **What this does not show.**
 - The model is trained on one year (2017) and applied to later years without new labels. The 2022 and 2023 maps have no pixel-level check, only the district totals above.
 - BBS district figures are themselves estimates. A gap between the map and BBS is not an error of the map alone.
+- One Sentinel-1 scene-band read failed after three attempts during the national run and was left out of its composite.
 - Some 2017 composites were read with a rasterio `NotGeoreferencedWarning`. Its source was not traced, and the composites were not spot-checked against an independent rebuild.
 
 ## Run it
