@@ -2,8 +2,10 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-data/
+data/*
+!data/bbs/
 work/
+work_smoke/
 output/
 downloads/
 *.npz

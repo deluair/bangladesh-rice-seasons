@@ -1,0 +1,20 @@
+{
+ "2022": {
+  "tile_years": 413,
+  "mean_any_gap_share": 0.0123,
+  "mean_vv_empty_bins": 0.314,
+  "mean_vh_empty_bins": 0.314
+ },
+ "2017": {
+  "tile_years": 413,
+  "mean_any_gap_share": 1.0,
+  "mean_vv_empty_bins": 0.544,
+  "mean_vh_empty_bins": 2.09
+ },
+ "2023": {
+  "tile_years": 413,
+  "mean_any_gap_share": 0.3956,
+  "mean_vv_empty_bins": 0.836,
+  "mean_vh_empty_bins": 0.836
+ }
+}
