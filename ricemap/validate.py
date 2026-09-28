@@ -1,7 +1,7 @@
 """BBS Ground-Truth Validation Module for District-Level Rice Area.
 
 Joins predicted district rice areas with BBS Yearbook of Agricultural Statistics 2023 data.
-Summing component variety tables (Local, HYV, Broadcast, Transplant, Hybrid) to obtain season totals.
+Uses the printed season Total tables.
 Handles the explicit district name reconciliation between geoBoundaries and BBS,
 and implements the exact seasonal crop calendar year mapping:
   - Calendar 2022:
@@ -75,24 +75,17 @@ def build_district_name_map(
 
 
 def load_bbs_season_totals(bbs_csv_path: str | Path) -> pd.DataFrame:
-    """Load BBS district rice area and sum non-total tables to calculate seasonal area_ha.
+    """Load BBS district season totals from the printed Total tables.
 
-    Per specification:
-    Season totals = sum of the Local/HYV/Broadcast/Transplant tables for that season.
-    Excludes rows where table_title contains 'TOTAL' or 'Total'.
+    Each season has one printed total table (Aus TOTAL=LOCAL+HYV, Total Aman, Total Boro).
+    The printed totals are used rather than summing the component tables, so a misprint
+    in a component row (Barguna HYV Aman 2021-22 reads 19 acres) does not propagate.
     """
     df = pd.read_csv(bbs_csv_path)
-    # Exclude aggregate rows from BBS tables
     df = df[df["district"].str.strip().str.upper() != "BANGLADESH"]
-    # Exclude total tables
-    non_total = df[~df["table_title"].str.contains("TOTAL|Total", case=False, na=False)]
-    # Sum area_ha by season, year, district
-    totals = (
-        non_total.groupby(["season", "year", "district"])["area_ha"]
-        .sum()
-        .reset_index()
-    )
-    return totals
+    totals = df[df["table_title"].str.contains("total", case=False, na=False)]
+    assert not totals.duplicated(["season", "year", "district"]).any(), "one total row per district expected"
+    return totals[["season", "year", "district", "area_ha"]].reset_index(drop=True)
 
 
 def validate_district_predictions(

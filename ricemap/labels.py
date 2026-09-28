@@ -57,6 +57,7 @@ def extract_tile_labels(
                     meta = json.loads(str(npz["metadata"]))
                     return {
                         "labels": npz["labels"],
+                        "valid": npz["valid"],
                         "fractions": npz["fractions"],
                         "ambiguous_counts": meta["ambiguous_counts"],
                         "ambiguous_shares": meta["ambiguous_shares"],
@@ -69,6 +70,7 @@ def extract_tile_labels(
 
     fractions_list = []
     binary_list = []
+    valid_mask = None
     ambiguous_counts = {}
     ambiguous_shares = {}
     positive_counts = {}
@@ -106,6 +108,22 @@ def extract_tile_labels(
                 dst_nodata=np.nan,
             )
 
+            # Footprint: a 20 m pixel is valid if >= half of its 10 m cells are inside the
+            # label footprint (not nodata). Outside pixels (India, sea) are excluded from
+            # training and evaluation. The three rasters share one footprint; take Aus.
+            if valid_mask is None:
+                valid_frac = np.zeros((dst_height, dst_width), dtype=np.float32)
+                reproject(
+                    source=(src_data != nodata).astype(np.float32),
+                    destination=valid_frac,
+                    src_transform=win_transform,
+                    src_crs=src.crs,
+                    dst_transform=dst_transform,
+                    dst_crs=dst_crs,
+                    resampling=Resampling.average,
+                )
+                valid_mask = (valid_frac >= 0.5).ravel().astype(np.uint8)
+
             # Infill any edge nodata with 0.0
             dst_frac = np.nan_to_num(dst_frac, nan=0.0)
 
@@ -134,6 +152,7 @@ def extract_tile_labels(
 
     res = {
         "labels": labels_array,
+        "valid": valid_mask,
         "fractions": fractions_array,
         "ambiguous_counts": ambiguous_counts,
         "ambiguous_shares": ambiguous_shares,
@@ -154,6 +173,7 @@ def extract_tile_labels(
         np.savez_compressed(
             out_npz,
             labels=labels_array,
+            valid=valid_mask,
             fractions=fractions_array,
             metadata=json.dumps(meta_dict),
         )

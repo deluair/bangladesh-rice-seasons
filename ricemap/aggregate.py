@@ -15,22 +15,25 @@ import numpy as np
 import pandas as pd
 import rasterio
 import requests
-from pyproj import Transformer
+from pyproj import Proj, Transformer
 from rasterio.features import rasterize
 from shapely.geometry import box, shape
 from shapely.ops import transform
+
+from ricemap.tiles import own_cell_mask, parse_tile_id
 
 GEOBOUNDARIES_API = {
     "ADM2": "https://www.geoboundaries.org/api/current/gbOpen/BGD/ADM2/",
     "ADM3": "https://www.geoboundaries.org/api/current/gbOpen/BGD/ADM3/",
 }
-PIXEL_AREA_HA = 0.04  # 20m x 20m UTM grid = 400 m2 = 0.04 ha
+PIXEL_AREA_HA = 0.04  # 20m x 20m UTM grid = 400 m2 = 0.04 ha (grid units, before scale correction)
+UTM = Proj("EPSG:32646")
 
 
 def fetch_admin_boundaries(
     level: str = "ADM2",
     cache_dir: str | Path = "data/geoboundaries",
-    use_simplified: bool = True,
+    use_simplified: bool = False,
     force: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fetch geoBoundaries metadata and GeoJSON for BGD ADM2 or ADM3.
@@ -89,7 +92,7 @@ def aggregate_rice_area_by_admin(
     """Aggregate predicted seasonal rice area by administrative unit.
 
     Overlays each 20m uint8 classification GeoTIFF with reprojected administrative polygons.
-    Computes area in hectares using true pixel area on UTM grid (0.04 ha/pixel).
+    Computes area in hectares as pixel count x 0.04 ha / UTM areal scale factor at the tile centre.
     """
     gj, api_meta = fetch_admin_boundaries(level=admin_level, cache_dir=cache_dir)
     license_field = api_meta.get("boundaryLicense", "")
@@ -116,6 +119,9 @@ def aggregate_rice_area_by_admin(
         u["shapeID"]: {"Aus": 0, "Aman": 0, "Boro": 0, "any_rice": 0, "total_pixels": 0}
         for u in admin_units
     }
+    areas: dict[str, dict[str, float]] = {
+        u["shapeID"]: {"Aus": 0.0, "Aman": 0.0, "Boro": 0.0, "any_rice": 0.0, "total": 0.0} for u in admin_units
+    }
 
     for tif_p in pred_tifs:
         tif_p = Path(tif_p)
@@ -127,6 +133,13 @@ def aggregate_rice_area_by_admin(
             tile_box = box(t_bounds.left, t_bounds.bottom, t_bounds.right, t_bounds.top)
             t_transform = src.transform
             t_shape = src.shape
+            # Neighbouring tile grids overlap; count each pixel in exactly one tile.
+            tile_id = "_".join(tif_p.name.split("_")[:2])
+            own = own_cell_mask(tile_id, t_transform, t_shape)
+            # True ground area of a 20 m UTM pixel: 0.04 ha divided by the UTM areal scale
+            # factor at the tile centre (1.002 to 1.006 across Bangladesh).
+            lon0, lat0, lon1, lat1 = parse_tile_id(tile_id)
+            px_ha = PIXEL_AREA_HA / UTM.get_factors((lon0 + lon1) / 2, (lat0 + lat1) / 2).areal_scale
 
             # Unpack bitmask:
             # bit 1 = Aus, bit 2 = Aman, bit 4 = Boro
@@ -154,6 +167,7 @@ def aggregate_rice_area_by_admin(
                     fill=0,
                     dtype=np.uint8,
                 ) == 1
+                poly_mask &= own
 
                 n_poly_pix = int(poly_mask.sum())
                 if n_poly_pix == 0:
@@ -165,6 +179,9 @@ def aggregate_rice_area_by_admin(
                 counts[sid]["Aman"] += int((poly_mask & aman_mask).sum())
                 counts[sid]["Boro"] += int((poly_mask & boro_mask).sum())
                 counts[sid]["any_rice"] += int((poly_mask & any_mask).sum())
+                for k in ("Aus", "Aman", "Boro", "any_rice"):
+                    areas[sid][k] += int((poly_mask & {"Aus": aus_mask, "Aman": aman_mask, "Boro": boro_mask, "any_rice": any_mask}[k]).sum()) * px_ha
+                areas[sid]["total"] += n_poly_pix * px_ha
 
     # Build results table
     rows = []
@@ -182,10 +199,11 @@ def aggregate_rice_area_by_admin(
             "aman_pixels": c["Aman"],
             "boro_pixels": c["Boro"],
             "any_rice_pixels": c["any_rice"],
-            "aus_area_ha": round(c["Aus"] * PIXEL_AREA_HA, 2),
-            "aman_area_ha": round(c["Aman"] * PIXEL_AREA_HA, 2),
-            "boro_area_ha": round(c["Boro"] * PIXEL_AREA_HA, 2),
-            "any_rice_area_ha": round(c["any_rice"] * PIXEL_AREA_HA, 2),
+            "mapped_area_ha": round(areas[sid]["total"], 2),
+            "aus_area_ha": round(areas[sid]["Aus"], 2),
+            "aman_area_ha": round(areas[sid]["Aman"], 2),
+            "boro_area_ha": round(areas[sid]["Boro"], 2),
+            "any_rice_area_ha": round(areas[sid]["any_rice"], 2),
             "license": license_field,
         })
 

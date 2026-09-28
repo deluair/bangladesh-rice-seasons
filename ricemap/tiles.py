@@ -88,8 +88,8 @@ def generate_national_grid(
 ) -> list[Tile]:
     """Scan Bangladesh territory and identify all 0.2 deg tiles.
 
-    If boro_label_path is given, filters to tiles with >0 rice pixels,
-    reproducing the 408 tiles identified in the pilot report.
+    If boro_label_path is given, keeps tiles with any valid (non-nodata) label pixel,
+    i.e. every tile that touches the Bangladesh label footprint.
     """
     min_lon, min_lat, max_lon, max_lat = BANGLADESH_BBOX
     lon_bins = np.arange(min_lon, max_lon + 1e-6, GRID_RESOLUTION_DEG)
@@ -111,7 +111,9 @@ def generate_national_grid(
                     w_int = w_clipped.round_offsets()
                     data = src.read(1, window=w_int)
                     boro_pixels = int((data == 100).sum())
-                    if boro_pixels > 0:
+                    # Keep every tile that touches the label footprint (Bangladesh), not only
+                    # tiles with 2017 Boro, so district totals cover the whole country.
+                    if int((data != src.nodata).sum()) > 0:
                         t = Tile(
                             tile_id=make_tile_id(lon, lat),
                             min_lon=round(float(lon), 4),
@@ -154,3 +156,19 @@ def get_tile_by_id(tile_id: str) -> Tile:
         max_lon=max_lon,
         max_lat=max_lat,
     )
+
+
+def own_cell_mask(tile_id: str, transform: Any, shape: tuple[int, int], crs: str = TARGET_CRS) -> np.ndarray:
+    """Boolean mask of pixels whose centres fall inside the tile's own lon/lat cell.
+
+    A tile's UTM grid is the envelope of a rotated lon/lat box, so neighbouring grids
+    overlap. Half-open intervals [min, max) assign every pixel centre to exactly one tile.
+    """
+    from pyproj import Transformer
+
+    min_lon, min_lat, max_lon, max_lat = parse_tile_id(tile_id)
+    rows, cols = np.indices(shape)
+    xs = transform.c + (cols + 0.5) * transform.a
+    ys = transform.f + (rows + 0.5) * transform.e
+    lon, lat = Transformer.from_crs(crs, "EPSG:4326", always_xy=True).transform(xs, ys)
+    return (lon >= min_lon) & (lon < max_lon) & (lat >= min_lat) & (lat < max_lat)
