@@ -107,9 +107,10 @@ def evaluate(model_path: Path, tile_ids: list[str], comp_dir: Path, labels_dir: 
 
     from ricemap.model import load_checkpoint
 
-    model, means, stds, _ = load_checkpoint(model_path)
+    model, means, stds, extra = load_checkpoint(model_path)
     dev = next(model.parameters()).device
     model.eval()
+    thr = torch.tensor(extra.get("thresholds", [0.5, 0.5, 0.5]), device=dev)
     cm = {s: {"tp": 0, "fp": 0, "fn": 0, "tn": 0} for s in SEASONS}
     n_pix = 0
     for tid in tile_ids:
@@ -123,14 +124,14 @@ def evaluate(model_path: Path, tile_ids: list[str], comp_dir: Path, labels_dir: 
             xb = (x[i : i + 65536].astype(np.float32) - means) / stds
             xb = torch.from_numpy(np.ascontiguousarray(xb.transpose(0, 2, 1))).to(dev)
             with torch.no_grad():
-                p = (torch.sigmoid(model(xb)) >= 0.5).cpu().numpy()
+                p = (torch.sigmoid(model(xb)) >= thr).cpu().numpy()
             t = y[i : i + 65536].astype(bool)
             for k, s in enumerate(SEASONS):
                 cm[s]["tp"] += int((p[:, k] & t[:, k]).sum())
                 cm[s]["fp"] += int((p[:, k] & ~t[:, k]).sum())
                 cm[s]["fn"] += int((~p[:, k] & t[:, k]).sum())
                 cm[s]["tn"] += int((~p[:, k] & ~t[:, k]).sum())
-    res = {"pixels": n_pix, "tiles": len(tile_ids)}
+    res = {"pixels": n_pix, "tiles": len(tile_ids), "thresholds": thr.cpu().tolist()}
     for s, c in cm.items():
         tp, fp, fn = c["tp"], c["fp"], c["fn"]
         res[s] = {
@@ -143,12 +144,50 @@ def evaluate(model_path: Path, tile_ids: list[str], comp_dir: Path, labels_dir: 
     return res
 
 
+def calibrate(model_path: Path, tile_ids: list[str], comp_dir: Path, labels_dir: Path) -> list[float]:
+    """Per-season probability threshold maximising IoU on the validation tiles; stored in the checkpoint."""
+    import torch
+
+    from ricemap.model import load_checkpoint
+
+    model, means, stds, extra = load_checkpoint(model_path)
+    dev = next(model.parameters()).device
+    grid = np.round(np.arange(0.05, 0.951, 0.05), 2)
+    tp = np.zeros((len(grid), 3)); fp = np.zeros((len(grid), 3)); fn = np.zeros((len(grid), 3))
+    for tid in tile_ids:
+        try:
+            x, y = tile_pixels(comp_dir, labels_dir, tid)
+        except FileNotFoundError:
+            continue
+        for i in range(0, len(x), 65536):
+            xb = (x[i : i + 65536].astype(np.float32) - means) / stds
+            xb = torch.from_numpy(np.ascontiguousarray(xb.transpose(0, 2, 1))).to(dev)
+            with torch.no_grad():
+                pr = torch.sigmoid(model(xb)).cpu().numpy()
+            t = y[i : i + 65536].astype(bool)
+            for g, th in enumerate(grid):
+                p = pr >= th
+                tp[g] += (p & t).sum(0); fp[g] += (p & ~t).sum(0); fn[g] += (~p & t).sum(0)
+    if (tp[0] + fn[0]).min() == 0:
+        log(f"calibrate: no validation positives for {model_path.name}, keeping 0.5")
+        return [0.5, 0.5, 0.5]
+    iou = tp / np.maximum(tp + fp + fn, 1)
+    best = [float(grid[int(np.argmax(iou[:, k]))]) for k in range(3)]
+    payload = torch.load(model_path, map_location="cpu", weights_only=False)
+    payload["extra_meta"] = {**payload.get("extra_meta", {}), "thresholds": best,
+                             "val_iou_at_threshold": [round(float(iou[:, k].max()), 4) for k in range(3)],
+                             "val_iou_at_0.5": [round(float(iou[int(np.where(grid == 0.5)[0][0]), k]), 4) for k in range(3)]}
+    torch.save(payload, model_path)
+    log(f"calibrated {model_path.name}: thresholds {best}, val IoU {payload['extra_meta']['val_iou_at_threshold']} (at 0.5: {payload['extra_meta']['val_iou_at_0.5']})")
+    return best
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", type=Path, required=True)
     ap.add_argument("--labels-raw", type=Path, required=True)
     ap.add_argument("--bbs-csv", type=Path, required=True)
-    ap.add_argument("--stage", default="all", choices=["all", "grid", "composite17", "labels", "train", "eval", "stream", "aggregate"])
+    ap.add_argument("--stage", default="all", choices=["all", "grid", "composite17", "labels", "train", "calibrate", "eval", "stream", "reinfer", "aggregate"])
     ap.add_argument("--procs", type=int, default=8)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--per-tile", type=int, default=100_000)
@@ -163,7 +202,7 @@ def main() -> None:
     comp, lab, models, pred, agg = (work / d for d in ["composites", "labels", "models", "predictions", "aggregates"])
     for d in (comp, lab, models, pred, agg):
         d.mkdir(parents=True, exist_ok=True)
-    stages = ["grid", "composite17", "labels", "train", "eval", "stream", "aggregate"] if a.stage == "all" else [a.stage]
+    stages = ["grid", "composite17", "labels", "train", "calibrate", "eval", "stream", "aggregate"] if a.stage == "all" else [a.stage]
 
     tiles = load_tiles(work, a.labels_raw)
     if a.limit:
@@ -209,6 +248,10 @@ def main() -> None:
             save_checkpoint(model, means, stds, name, path, extra_meta={**meta, "history": r["history"]})
         del xn
 
+    if "calibrate" in stages:
+        for path in (cnn_p, lr_p):
+            calibrate(path, splits["val"], comp, lab)
+
     if "eval" in stages:
         out = {}
         for name, path in [("cnn", cnn_p), ("logistic_regression", lr_p)]:
@@ -239,6 +282,16 @@ def main() -> None:
                         npz.unlink()
                     if i % 20 == 0 or i == len(todo):
                         log(f"stream {yr}: {i}/{len(todo)}")
+
+    if "reinfer" in stages:
+        from ricemap.infer import run_tile_inference
+
+        npzs = sorted(comp.glob("*_timeseries.npz"))
+        log(f"reinfer: {len(npzs)} tile-years with calibrated thresholds")
+        for i, npz in enumerate(npzs, 1):
+            run_tile_inference(cnn_p, npz, out_dir=pred, force=True)
+            if i % 100 == 0 or i == len(npzs):
+                log(f"reinfer: {i}/{len(npzs)}")
 
     if "aggregate" in stages:
         from ricemap.aggregate import aggregate_rice_area_by_admin

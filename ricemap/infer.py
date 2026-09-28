@@ -63,7 +63,9 @@ def run_tile_inference(
             with open(out_meta_json) as f:
                 return json.load(f)
 
-    model, ch_means, ch_stds, _ = load_checkpoint(model_checkpoint, device=device)
+    model, ch_means, ch_stds, extra = load_checkpoint(model_checkpoint, device=device)
+    # Per-season thresholds chosen on the validation tiles; 0.5 if not calibrated.
+    thr = torch.tensor(extra.get("thresholds", [0.5, 0.5, 0.5]))
     dev = next(model.parameters()).device
 
     # Normalize strictly using checkpoint float64-derived stats
@@ -79,7 +81,7 @@ def run_tile_inference(
             logits = model(bx)
             probs = torch.sigmoid(logits)
             # Binary threshold 0.5
-            bin_preds = (probs >= 0.5).cpu().numpy().astype(np.uint8)
+            bin_preds = (probs >= thr.to(probs.device)).cpu().numpy().astype(np.uint8)
             preds_list.append(bin_preds)
 
     binary_all = np.vstack(preds_list)  # [pixels, 3] (0=Aus, 1=Aman, 2=Boro)
